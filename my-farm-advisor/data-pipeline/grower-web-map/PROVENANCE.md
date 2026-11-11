@@ -4,5 +4,7 @@
   My Farm Advisor data pipeline for each runtime farm.
 - Map library: Leaflet 1.9.4 loaded from `https://unpkg.com/leaflet@1.9.4/`.
 - Basemap: ESRI World Imagery tiles loaded online from ArcGIS REST services.
-- Implementation: local standard-library Python HTML/JSON generator; no raw
-  imagery or raster data is embedded in generated maps.
+- Implementation: local standard-library Python HTML/JSON dashboard generator;
+  no raw imagery or raster data is embedded in generated maps.
+- Replacement dashboard source: `src/grower_web_map_dashboard.py`, installed
+  into the runtime as `scripts/grower_web_map_dashboard.py`.
