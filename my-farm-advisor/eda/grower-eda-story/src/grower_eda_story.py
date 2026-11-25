@@ -76,6 +76,29 @@ def shape_aspect_ratio(frame: pd.DataFrame) -> pd.Series:
     return pd.Series(values, index=frame.index, dtype=float)
 
 
+def rank_test_rows(frame: pd.DataFrame, metric: str, growers: list[str]) -> pd.DataFrame:
+    values_by_grower = [frame.loc[frame.grower_slug.eq(grower), metric].dropna().to_numpy() for grower in growers]
+    rows = []
+    kw = stats.kruskal(*values_by_grower)
+    epsilon_sq = max(0.0, (kw.statistic - len(growers) + 1) / (sum(map(len, values_by_grower)) - len(growers)))
+    rows.append({"metric": metric, "test": "Kruskal-Wallis", "group_a": "all", "group_b": "all", "n_a": sum(map(len, values_by_grower)), "n_b": "", "statistic": kw.statistic, "p_value": kw.pvalue, "p_adjusted": "", "effect_size": epsilon_sq})
+    pairwise = []
+    for i in range(len(growers)):
+        for j in range(i + 1, len(growers)):
+            result = stats.mannwhitneyu(values_by_grower[i], values_by_grower[j], alternative="two-sided")
+            pairwise.append((i, j, result))
+    ordered = sorted(pairwise, key=lambda item: item[2].pvalue)
+    adjusted = {}
+    prior = 0.0
+    for rank, (i, j, result) in enumerate(ordered):
+        adjusted[(i, j)] = prior = max(prior, min(1.0, (len(pairwise) - rank) * result.pvalue))
+    for i, j, result in pairwise:
+        u = result.statistic
+        rank_biserial = 1 - (2 * u / (len(values_by_grower[i]) * len(values_by_grower[j])))
+        rows.append({"metric": metric, "test": "Mann-Whitney U", "group_a": growers[i], "group_b": growers[j], "n_a": len(values_by_grower[i]), "n_b": len(values_by_grower[j]), "statistic": u, "p_value": result.pvalue, "p_adjusted": adjusted[(i, j)], "effect_size": rank_biserial})
+    return pd.DataFrame(rows)
+
+
 def runtime_root() -> Path:
     raw = os.environ.get("DATA_PIPELINE_DATA_ROOT")
     if not raw or not Path(raw).is_absolute():
@@ -295,20 +318,34 @@ def build_analysis_and_figures(frames: dict[str, pd.DataFrame], out: Path,
     boundary_comparison = pd.DataFrame(geom_rows)
     artifacts["analysis/boundary_comparison.csv"] = write_frame(boundary_comparison, out_analysis / "boundary_comparison.csv")
 
+    growers = ordered_growers(inventory.grower_slug)
+    display_names = [grower.replace("-", " ").title() for grower in growers]
+    acreage_tests = rank_test_rows(inventory, "area_acres", growers)
+    artifacts["analysis/boundary_acreage_tests.csv"] = write_frame(acreage_tests, out_analysis / "boundary_acreage_tests.csv")
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    for i, grower in enumerate(ordered_growers(inventory.grower_slug)):
-        group = inventory[inventory.grower_slug.eq(grower)]
-        values = group.sort_values("area_acres").area_acres.to_numpy()
-        ax.scatter(values, np.full(len(values), i), s=42, label=grower.replace("-", " ").title())
-        ax.plot([values.min(), values.max()], [i, i], lw=2, alpha=.35)
-        ax.text(values.max() + 8, i, f"median {np.median(values):.0f} ac", va="center", fontsize=8)
-    grower_order = ordered_growers(inventory.grower_slug)
-    ax.set_yticks(range(len(grower_order)))
-    ax.set_yticklabels([x.replace("-", " ").title() for x in grower_order])
-    ax.invert_yaxis()
-    ax.set_xlim(left=None, right=inventory.area_acres.max() + 90)
-    ax.set_xlabel("Field area (acres)"); ax.set_title("Field boundary acreage by grower")
-    ax.grid(axis="x", alpha=.25); add_note(fig, "10 fields per grower; dots are fields, not independent weather observations.")
+    values_by_grower = [inventory.loc[inventory.grower_slug.eq(grower), "area_acres"].dropna().to_numpy() for grower in growers]
+    box = ax.boxplot(values_by_grower, positions=np.arange(1, len(growers) + 1), widths=.55, patch_artist=True, showfliers=False, medianprops={"color": "#222222", "linewidth": 1.5}, whiskerprops={"color": "#555555"}, capprops={"color": "#555555"})
+    for patch, color in zip(box["boxes"], ["#d99b32", "#4d86c5", "#6b8e5a"]):
+        patch.set_facecolor(color); patch.set_alpha(.62)
+    rng = np.random.default_rng(43)
+    for position, grower, values in zip(range(1, len(growers) + 1), growers, values_by_grower):
+        ax.scatter(position + rng.uniform(-.11, .11, len(values)), values, s=30, color="#333333", edgecolor="white", linewidth=.5, zorder=3)
+        total = values.sum()
+        ax.text(position, -.12, f"median {np.median(values):.0f} ac\ntotal {total:,.0f} ac", ha="center", va="top", fontsize=7.5, transform=ax.get_xaxis_transform())
+    kw = acreage_tests.iloc[0]
+    ax.text(.02, .98, f"Kruskal–Wallis H={kw.statistic:.2f}, p={kw.p_value:.3g}, ε²={kw.effect_size:.2f}", transform=ax.transAxes, va="top", fontsize=8)
+    pairwise = acreage_tests[acreage_tests.test.eq("Mann-Whitney U")].sort_values("p_adjusted")
+    bracket_y = [875, 925, 825]
+    bracket_pairs = [(0, 2), (0, 1), (1, 2)]
+    for (left, right), y, (_, row) in zip(bracket_pairs, bracket_y, pairwise.iterrows()):
+        label = "ns" if row.p_adjusted >= .05 else ("p<0.001" if row.p_adjusted < .001 else f"p={row.p_adjusted:.3f}")
+        ax.plot([left + 1, left + 1, right + 1, right + 1], [y - 8, y, y, y - 8], color="#555555", linewidth=.8)
+        ax.text((left + right) / 2 + 1, y + 5, label, ha="center", va="bottom", fontsize=7)
+    ax.set_xticks(range(1, len(growers) + 1), display_names)
+    ax.set_ylabel("Field area (acres)"); ax.set_title("Field acreage distributions by grower")
+    ax.set_ylim(0, 990); ax.grid(axis="y", alpha=.25)
+    fig.subplots_adjust(bottom=.22)
+    add_note(fig, "Box plots show median/IQR with 1.5×IQR whiskers; dots are individual fields (n=10 per grower). Rank tests are exploratory, not confirmatory inference.")
     artifacts["figures/boundary_acreage.png"] = save_figure(fig, out_figures / "boundary_acreage.png")
 
     # Shape figure uses projected geometries from the canonical boundary files.
