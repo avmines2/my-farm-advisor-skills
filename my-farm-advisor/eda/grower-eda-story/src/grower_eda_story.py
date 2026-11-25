@@ -21,9 +21,11 @@ from typing import Any
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import contextily as cx
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as patheffects
 from matplotlib.colors import ListedColormap
 
 VERSION = "0.2.0-figures"
@@ -312,21 +314,62 @@ def build_analysis_and_figures(frames: dict[str, pd.DataFrame], out: Path,
     artifacts["figures/boundary_shape.png"] = save_figure(fig, out_figures / "boundary_shape.png")
 
     # Static three-panel boundary map, colored by boundary's 2023 CDL snapshot.
+    # Esri World Imagery provides geographic context while translucent crop
+    # overlays preserve the 2023 CDL comparison shown by this figure.
     fig, axes = plt.subplots(1, 3, figsize=(14, 5.8))
     colors = {"Corn": "#d99b32", "Soybeans": "#4d86c5"}
     for ax, grower in zip(axes, ordered_growers(inventory.grower_slug)):
         group = inventory[inventory.grower_slug.eq(grower)]
         plot_group = gpd.GeoDataFrame(group, geometry=group["_geometry"], crs="EPSG:5070")
+        xmin, ymin, xmax, ymax = plot_group.total_bounds
+        xpad = max((xmax - xmin) * 0.08, 2_000)
+        ypad = max((ymax - ymin) * 0.08, 2_000)
+        ax.set_xlim(xmin - xpad, xmax + xpad)
+        ax.set_ylim(ymin - ypad, ymax + ypad)
+        cx.add_basemap(
+            ax,
+            crs="EPSG:5070",
+            source=cx.providers.Esri.WorldImagery,
+            zoom="auto",
+            reset_extent=False,
+            attribution=False,
+            alpha=0.9,
+        )
         for crop, subset in plot_group.groupby("crop"):
-            subset.plot(ax=ax, color=colors.get(crop, "#8a9a93"), edgecolor="white", linewidth=.7, label=crop)
+            subset.plot(
+                ax=ax,
+                color=colors.get(crop, "#8a9a93"),
+                edgecolor="white",
+                linewidth=.8,
+                alpha=0.52,
+                label=crop,
+            )
         for _, row in plot_group.iterrows():
             point = row.geometry.representative_point()
-            ax.text(point.x, point.y, str(row.field_id), fontsize=7, ha="center", va="center")
+            ax.text(
+                point.x,
+                point.y,
+                str(row.field_id),
+                fontsize=7,
+                fontweight="bold",
+                color="white",
+                ha="center",
+                va="center",
+                path_effects=[patheffects.withStroke(linewidth=2.4, foreground="#222222")],
+            )
         ax.set_title(grower.replace("-", " ").title(), y=.91); ax.set_axis_off()
     handles, labels = axes[0].get_legend_handles_labels()
     if handles: fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False)
     fig.suptitle("Field boundaries and 2023 CDL crop snapshot", y=.98)
-    fig.subplots_adjust(top=.80, bottom=.14, wspace=.08)
+    fig.text(
+        0.01,
+        0.01,
+        "Basemap: Esri World Imagery — Esri, i-cubed, USDA, USGS, AEX, GeoEye, "
+        "Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community.",
+        fontsize=6.5,
+        color="#444444",
+    )
+    fig.subplots_adjust(top=.80, bottom=.16, wspace=.08)
     artifacts["figures/boundary_map.png"] = save_figure(fig, out_figures / "boundary_map.png")
 
     # Weather comparison and figures.
