@@ -45,6 +45,7 @@ data-pipeline/derived/eda-story/
   tables/cross_grower_fields.csv
   tables/field_shape_metrics.csv
   analysis/boundary_comparison.csv
+  analysis/boundary_shape_tests.csv
   analysis/weather_comparison.csv
   analysis/cdl_comparison.csv
   figures/boundary_acreage.png

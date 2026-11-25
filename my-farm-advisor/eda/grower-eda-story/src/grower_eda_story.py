@@ -28,6 +28,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
 from matplotlib.colors import ListedColormap
 from matplotlib.lines import Line2D
+from scipy import stats
 
 VERSION = "0.2.0-figures"
 DEFAULT_START = 2021
@@ -61,6 +62,17 @@ def shape_compactness(frame: pd.DataFrame) -> pd.Series:
     values = []
     for geometry in frame["_geometry"]:
         values.append(4 * np.pi * geometry.area / geometry.length ** 2 if geometry is not None and geometry.length else np.nan)
+    return pd.Series(values, index=frame.index, dtype=float)
+
+
+def shape_aspect_ratio(frame: pd.DataFrame) -> pd.Series:
+    values = []
+    for geometry in frame["_geometry"]:
+        rectangle = geometry.minimum_rotated_rectangle
+        xs, ys = rectangle.exterior.xy
+        edges = [np.hypot(xs[i + 1] - xs[i], ys[i + 1] - ys[i]) for i in range(4)]
+        short_edge = min(edges)
+        values.append(max(edges) / short_edge if short_edge else np.nan)
     return pd.Series(values, index=frame.index, dtype=float)
 
 
@@ -302,16 +314,66 @@ def build_analysis_and_figures(frames: dict[str, pd.DataFrame], out: Path,
     # Shape figure uses projected geometries from the canonical boundary files.
     shape = inventory.copy()
     shape["compactness"] = shape_compactness(shape)
+    shape["aspect_ratio"] = shape_aspect_ratio(shape)
     shape_metrics = shape.drop(columns=["_geometry"])
     shape_metrics.to_csv(out_tables / "field_shape_metrics.csv", index=False)
     artifacts["tables/field_shape_metrics.csv"] = sha256(out_tables / "field_shape_metrics.csv")
-    fig, ax = plt.subplots(figsize=(8, 5.5))
-    for grower in ordered_growers(shape.grower_slug):
-        group = shape[shape.grower_slug.eq(grower)]
-        ax.scatter(group.area_acres, group.compactness, label=grower.replace("-", " ").title(), s=45)
-    ax.set_xlabel("Field area (acres)"); ax.set_ylabel("Polsby–Popper compactness")
-    ax.set_title("Boundary size and shape (descriptive)"); ax.legend(frameon=False); ax.grid(alpha=.25)
-    add_note(fig, "Compactness is calculated in EPSG:5070; it describes polygon geometry, not management quality.")
+    growers = ordered_growers(shape.grower_slug)
+    display_names = [grower.replace("-", " ").title() for grower in growers]
+    metric_specs = [
+        ("compactness", "Polsby–Popper compactness", ".2f"),
+        ("aspect_ratio", "Minimum-rectangle aspect ratio", ".2f"),
+    ]
+    tests = []
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+    rng = np.random.default_rng(42)
+    for ax, (metric, label, fmt) in zip(axes, metric_specs):
+        values_by_grower = [shape.loc[shape.grower_slug.eq(grower), metric].dropna().to_numpy() for grower in growers]
+        positions = np.arange(1, len(growers) + 1)
+        box = ax.boxplot(
+            values_by_grower,
+            positions=positions,
+            widths=.55,
+            patch_artist=True,
+            showfliers=False,
+            medianprops={"color": "#222222", "linewidth": 1.5},
+            whiskerprops={"color": "#555555"},
+            capprops={"color": "#555555"},
+        )
+        palette = ["#d99b32", "#4d86c5", "#6b8e5a"]
+        for patch, color in zip(box["boxes"], palette):
+            patch.set_facecolor(color)
+            patch.set_alpha(.62)
+        for position, values in zip(positions, values_by_grower):
+            jitter = rng.uniform(-.11, .11, len(values))
+            ax.scatter(position + jitter, values, s=25, color="#333333", edgecolor="white", linewidth=.45, zorder=3)
+            ax.text(position, -.13, f"median {np.median(values):{fmt}}", ha="center", va="top", fontsize=7, transform=ax.get_xaxis_transform())
+        kw = stats.kruskal(*values_by_grower)
+        epsilon_sq = max(0.0, (kw.statistic - len(growers) + 1) / (sum(map(len, values_by_grower)) - len(growers)))
+        tests.append({"metric": metric, "test": "Kruskal-Wallis", "group_a": "all", "group_b": "all", "n_a": sum(map(len, values_by_grower)), "n_b": "", "statistic": kw.statistic, "p_value": kw.pvalue, "p_adjusted": "", "effect_size": epsilon_sq})
+        pairwise = []
+        for i in range(len(growers)):
+            for j in range(i + 1, len(growers)):
+                result = stats.mannwhitneyu(values_by_grower[i], values_by_grower[j], alternative="two-sided")
+                pairwise.append((i, j, result))
+        ordered = sorted(pairwise, key=lambda item: item[2].pvalue)
+        adjusted = {}
+        prior = 0.0
+        for rank, (i, j, result) in enumerate(ordered):
+            adjusted[(i, j)] = prior = max(prior, min(1.0, (len(pairwise) - rank) * result.pvalue))
+            u = result.statistic
+            rank_biserial = 1 - (2 * u / (len(values_by_grower[i]) * len(values_by_grower[j])))
+            tests.append({"metric": metric, "test": "Mann-Whitney U", "group_a": growers[i], "group_b": growers[j], "n_a": len(values_by_grower[i]), "n_b": len(values_by_grower[j]), "statistic": u, "p_value": result.pvalue, "p_adjusted": adjusted[(i, j)], "effect_size": rank_biserial})
+        ax.set_xticks(positions, display_names)
+        ax.set_ylabel(label)
+        ax.set_title(label)
+        ax.grid(axis="y", alpha=.25)
+        ax.text(.02, .98, f"Kruskal–Wallis H={kw.statistic:.2f}, p={kw.pvalue:.3f}, ε²={epsilon_sq:.2f}", transform=ax.transAxes, va="top", fontsize=8)
+    tests_frame = pd.DataFrame(tests)
+    artifacts["analysis/boundary_shape_tests.csv"] = write_frame(tests_frame, out_analysis / "boundary_shape_tests.csv")
+    fig.suptitle("Field shape distributions by grower", y=.995)
+    fig.subplots_adjust(top=.86, bottom=.20, wspace=.28)
+    add_note(fig, "Box plots show field-level distributions (n=10 per grower); dots are individual fields. Rank tests are exploratory, not confirmatory inference.")
     artifacts["figures/boundary_shape.png"] = save_figure(fig, out_figures / "boundary_shape.png")
 
     # Static three-panel boundary map, colored by boundary's 2023 CDL snapshot.
