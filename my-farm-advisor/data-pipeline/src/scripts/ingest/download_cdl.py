@@ -38,6 +38,25 @@ from cdl_reporting import extract_crop_composition, summarize_crop_history
 DEFAULT_CDL_LATEST_YEAR = 2023  # 2026 program data rule: external data must be public by 2026-02-01 (CDL 2024+ publishes later)
 DEFAULT_CDL_WINDOW_YEARS = 5
 
+# USDA/NASS state CDL files use numeric FIPS identifiers. Boundary ingestion
+# normally provides ``state_fips``, but older/state-seeded boundary files may
+# only carry the two-letter ``state`` abbreviation. Keep this small lookup
+# local to the CDL ingest so those boundaries cannot silently fall back to
+# Iowa (the historical default).
+STATE_FIPS_BY_ABBR = {
+    "AL": "01", "AK": "02", "AZ": "04", "AR": "05", "CA": "06",
+    "CO": "08", "CT": "09", "DE": "10", "DC": "11", "FL": "12",
+    "GA": "13", "HI": "15", "ID": "16", "IL": "17", "IN": "18",
+    "IA": "19", "KS": "20", "KY": "21", "LA": "22", "ME": "23",
+    "MD": "24", "MA": "25", "MI": "26", "MN": "27", "MS": "28",
+    "MO": "29", "MT": "30", "NE": "31", "NV": "32", "NH": "33",
+    "NJ": "34", "NM": "35", "NY": "36", "NC": "37", "ND": "38",
+    "OH": "39", "OK": "40", "OR": "41", "PA": "42", "RI": "44",
+    "SC": "45", "SD": "46", "TN": "47", "TX": "48", "UT": "49",
+    "VT": "50", "VA": "51", "WA": "53", "WV": "54", "WI": "55",
+    "WY": "56",
+}
+
 
 def _cdl_coverage_label(*, conus: bool, state_fips: str | None = None) -> str:
     return "CONUS" if conus else str(state_fips or "19").zfill(2)
@@ -189,11 +208,36 @@ def parse_args() -> argparse.Namespace:
 
 
 def _state_fips_values(fields: gpd.GeoDataFrame) -> list[str]:
-    if "state_fips" not in fields.columns:
-        return ["19"]
-    values = (
-        pd.Series(fields["state_fips"], dtype="object").fillna("").astype(str).str.strip().tolist()
-    )
+    if "state_fips" in fields.columns:
+        values = (
+            pd.Series(fields["state_fips"], dtype="object")
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .tolist()
+        )
+        unique_values = sorted({value.zfill(2) for value in values if value})
+        if unique_values:
+            return unique_values
+
+    if "state" in fields.columns:
+        states = (
+            pd.Series(fields["state"], dtype="object")
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .tolist()
+        )
+        unique_values = sorted(
+            {STATE_FIPS_BY_ABBR[state] for state in states if state in STATE_FIPS_BY_ABBR}
+        )
+        if unique_values:
+            return unique_values
+
+    # Preserve the legacy default only for boundary files that carry neither
+    # state representation. Existing Iowa runtime data relies on this path.
+    values = []
     unique_values = sorted({value.zfill(2) for value in values if value})
     return unique_values or ["19"]
 
