@@ -27,6 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
 from matplotlib.colors import ListedColormap
+from matplotlib.lines import Line2D
 
 VERSION = "0.2.0-figures"
 DEFAULT_START = 2021
@@ -323,8 +324,11 @@ def build_analysis_and_figures(frames: dict[str, pd.DataFrame], out: Path,
         plot_group = gpd.GeoDataFrame(group, geometry=group["_geometry"], crs="EPSG:5070")
         xmin, ymin, xmax, ymax = plot_group.total_bounds
         xpad = max((xmax - xmin) * 0.08, 2_000)
+        label_gap = max((xmax - xmin) * 0.13, 5_000)
+        label_width = max((xmax - xmin) * 0.16, 6_000)
         ypad = max((ymax - ymin) * 0.08, 2_000)
-        ax.set_xlim(xmin - xpad, xmax + xpad)
+        label_x = xmax + xpad + label_gap * 0.45
+        ax.set_xlim(xmin - xpad, xmax + xpad + label_gap + label_width)
         ax.set_ylim(ymin - ypad, ymax + ypad)
         cx.add_basemap(
             ax,
@@ -335,6 +339,33 @@ def build_analysis_and_figures(frames: dict[str, pd.DataFrame], out: Path,
             attribution=False,
             alpha=0.9,
         )
+
+        # Draw leader lines first. The crop polygons and their white boundaries
+        # are rendered afterward, so any segment crossing a field is hidden;
+        # labels themselves are placed only in the outside margin column.
+        anchors = []
+        for _, row in plot_group.iterrows():
+            point = row.geometry.representative_point()
+            anchors.append((row.field_id, point.x, point.y))
+        anchors.sort(key=lambda item: item[2], reverse=True)
+        y_min, y_max = ymin - ypad * 0.25, ymax + ypad * 0.25
+        min_spacing = max((ymax - ymin) * 0.065, 1_000)
+        label_positions = []
+        for field_id, point_x, point_y in anchors:
+            label_y = min(point_y, y_max) if not label_positions else min(point_y, label_positions[-1] - min_spacing)
+            label_positions.append(label_y)
+        if label_positions and label_positions[-1] < y_min:
+            shift = y_min - label_positions[-1]
+            label_positions = [value + shift for value in label_positions]
+        for (field_id, point_x, point_y), label_y in zip(anchors, label_positions):
+            ax.plot(
+                [point_x, label_x - label_gap * 0.18],
+                [point_y, label_y],
+                color="#f2f7f2",
+                alpha=0.75,
+                linewidth=0.6,
+                zorder=1,
+            )
         for crop, subset in plot_group.groupby("crop"):
             subset.plot(
                 ax=ax,
@@ -344,32 +375,36 @@ def build_analysis_and_figures(frames: dict[str, pd.DataFrame], out: Path,
                 alpha=0.52,
                 label=crop,
             )
-        for _, row in plot_group.iterrows():
-            point = row.geometry.representative_point()
+        for (field_id, _, _), label_y in zip(anchors, label_positions):
             ax.text(
-                point.x,
-                point.y,
-                str(row.field_id),
-                fontsize=7,
+                label_x,
+                label_y,
+                str(field_id),
+                fontsize=6.2,
                 fontweight="bold",
                 color="white",
-                ha="center",
+                ha="left",
                 va="center",
-                path_effects=[patheffects.withStroke(linewidth=2.4, foreground="#222222")],
+                clip_on=False,
+                zorder=5,
+                path_effects=[patheffects.withStroke(linewidth=2.0, foreground="#222222")],
             )
         ax.set_title(grower.replace("-", " ").title(), y=.91); ax.set_axis_off()
-    handles, labels = axes[0].get_legend_handles_labels()
-    if handles: fig.legend(handles, labels, loc="lower center", ncol=3, frameon=False)
+    legend_handles = [
+        Line2D([0], [0], marker="s", linestyle="", markersize=10, markerfacecolor=colors["Corn"], markeredgecolor="white", label="Corn"),
+        Line2D([0], [0], marker="s", linestyle="", markersize=10, markerfacecolor=colors["Soybeans"], markeredgecolor="white", label="Soybeans"),
+    ]
+    fig.legend(legend_handles, ["Corn", "Soybeans"], loc="lower center", bbox_to_anchor=(0.5, 0.045), ncol=2, frameon=False)
     fig.suptitle("Field boundaries and 2023 CDL crop snapshot", y=.98)
     fig.text(
         0.01,
-        0.01,
+        0.012,
         "Basemap: Esri World Imagery — Esri, i-cubed, USDA, USGS, AEX, GeoEye, "
         "Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community.",
         fontsize=6.5,
         color="#444444",
     )
-    fig.subplots_adjust(top=.80, bottom=.16, wspace=.08)
+    fig.subplots_adjust(top=.80, bottom=.18, wspace=.08)
     artifacts["figures/boundary_map.png"] = save_figure(fig, out_figures / "boundary_map.png")
 
     # Weather comparison and figures.
